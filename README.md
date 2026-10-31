@@ -1,16 +1,104 @@
 # orion-cara
 
-Cara animada y pantalla de estado para un asistente de IA local, en una **LilyGO Lily Pi** (ESP32 con pantalla táctil de 3.5").
+Una pantallita de escritorio con un **avatar animado** que muestra qué está haciendo tu asistente de IA local: piensa mientras procesa tu mensaje de WhatsApp, se alegra cuando responde, pone cara de error si no responde y se duerme cuando el LLM está apagado. Abajo muestra el estado del PC (LLM, gateway, webhook, CPU, RAM y GPU).
 
-La cara reacciona a los **turnos del asistente en WhatsApp**: piensa mientras procesa tu mensaje (y muestra qué herramienta está usando), se alegra cuando responde y pone cara de error si no respondió. Cuando no hay turnos en curso, duerme si el LLM está apagado o queda en modo "choro". Abajo muestra el estado del PC: LLM, gateway, webhook de WhatsApp, CPU, RAM y GPU.
+El avatar se elige: Pokémon, Cthulhu, Goku o lo que quieras, dentro de un **círculo de color** que también se cambia.
 
-Cada expresión puede ser la cara dibujada por código o un **clip en loop** (skin) con el personaje que quieras.
+Hecho para una **LilyGO Lily Pi** (ESP32 con pantalla táctil de 3.5") y un asistente con [Hermes Agent](https://github.com/NousResearch/hermes-agent) + llama.cpp.
 
 ```
- WhatsApp ──► Meta Cloud API ──► Hermes gateway ──hook orion_cara──► socket unix ──► bridge (PC) ──USB──► Lily Pi
-                                     │                                                   ▲
-                                     └──► llama.cpp (LLM)  ◄── estado: systemd, /slots, CPU/RAM/GPU ┘
+ WhatsApp ─► Meta Cloud API ─► Hermes gateway ─hook orion_cara─► socket unix ─► bridge (PC) ─USB─► Lily Pi
+                                   │                                               ▲
+                                   └─► llama.cpp ◄── estado: systemd, /slots, CPU/RAM/GPU ──┘
 ```
+
+## Inicio rápido
+
+Requisitos en el PC: [PlatformIO](https://platformio.org/), `ffmpeg`, ImageMagick, Python 3 con `pyserial` y `psutil` (`nvidia-smi` opcional).
+En Arch: `pacman -S platformio-core platformio-core-udev ffmpeg imagemagick python-pyserial python-psutil`. Tu usuario debe tener acceso al puerto serie (grupo `uucp` en Arch, `dialout` en Debian/Ubuntu).
+
+```bash
+# 1. firmware
+pio run -t upload
+
+# 2. avatares (ver "Crear un avatar")
+tools/subir.sh pikachu cthulhu
+
+# 3. puente en el PC
+ln -s "$PWD/bridge/orion-cara.service" ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now orion-cara
+
+# 4. hook de Hermes (los hooks se cargan al arrancar el gateway)
+ln -s "$PWD/hermes-hook" ~/.hermes/hooks/orion_cara
+systemctl --user restart hermes-gateway
+
+# 5. probar sin mandar mensajes
+python3 bridge/orion_cara.py simular
+```
+
+> El servicio asume que el repo está en `~/esp32/orion-cara` (puede ser un symlink); ajusta `ExecStart` si no.
+
+## Usar la pantalla
+
+| Acción | Cómo |
+|---|---|
+| Cambiar de avatar | **tocar** la pantalla, o `python3 bridge/orion_cara.py enviar avatar pikachu` |
+| Cambiar el color del círculo | **mantener presionado** (~1 s), o `enviar fondo morado` / `enviar fondo #FF8800` |
+| Color del anillo | `enviar anillo blanco` |
+| Sin círculo | `enviar circulo off` |
+| Vertical / horizontal | `enviar girar vertical` / `enviar girar horizontal` |
+| Ver avatares cargados | `enviar avatares` (la respuesta sale en `journalctl --user -u orion-cara`) |
+| Mensaje en pantalla | `enviar texto Hola!` (15 s) |
+
+Colores con nombre: `azul`, `celeste`, `morado`, `rosado`, `rojo`, `naranja`, `amarillo`, `verde`, `gris`, `negro`, `blanco`. La placa **recuerda** avatar, colores y orientación aunque la desconectes.
+
+## Qué muestra
+
+| Situación | Estado del avatar | Frase |
+|---|---|---|
+| Llega un mensaje por WhatsApp | `pensando` | `WhatsApp: pensando...` / `usando <herramienta>` |
+| Orión respondió | clip `listo` + `feliz` (10 s) | `WhatsApp: respondido!` |
+| Terminó sin respuesta / 5 min sin terminar | `error` (30 s) | `WhatsApp: no respondio` |
+| Un servicio en estado `failed` | `error` | `Chuta, se cayo un servicio` |
+| LLM apagado | `durmiendo` (al prender: clip `despierta`) | `Modo juego: LLM apagado` |
+| Nada en curso | `reposo` | `Wena, soy Orion` |
+
+## Crear un avatar
+
+Cada avatar es una carpeta en el PC, por defecto `~/esp32/avatares/<nombre>/` (cambiable con `AVATARES_DIR`), con **un archivo por estado**:
+
+```
+~/esp32/avatares/pikachu/
+  reposo.pixel.gif        ← obligatorio
+  feliz.pixel.gif         ← opcional
+  ...
+```
+
+- **Estados:** `reposo` (obligatorio), `pensando`, `feliz`, `durmiendo`, `error`, `listo`, `despierta`. Los que falten **se generan solos** desde `reposo` con efectos: `?` al pensar, salto al estar feliz, `z` y oscuro al dormir, rojo y temblor en error, fundido al despertar.
+- **Modo** (parte del nombre, opcional), según el tipo de imagen:
+
+| Modo | Para | Ejemplo |
+|---|---|---|
+| `pixel` | sprites con transparencia en pixel art (sin suavizar) | sprites animados de Pokémon Showdown |
+| `blanco` | stickers/emojis con fondo blanco: quita el fondo que toca los bordes (no el blanco de los ojos) | emojis animados |
+| `foto` | videos/imágenes con fondo: llenan todo el círculo | escenas, GIFs de anime |
+| *(ninguno)* | imágenes con transparencia, escalado suave | stickers PNG/GIF transparentes |
+
+Luego:
+
+```bash
+tools/subir.sh pikachu cthulhu charmander   # convierte y sube SOLO esos (reemplaza lo que había)
+tools/subir.sh --todos                       # todos los de ~/esp32/avatares
+tools/avatar.sh ~/esp32/avatares/pikachu     # solo convertir uno, sin subir
+```
+
+Opciones de `avatar.sh` por variable: `SEGUNDOS` (2; se redondea a ciclos completos del GIF), `MAX_SEGUNDOS` (4), `FPS` (10), `CALIDAD` (10; 2 = mejor, 31 = peor).
+
+### Espacio
+
+La flash tiene **~9.9 MB** para avatares y cada uno ocupa **~1–1.3 MB**: caben 5–8 a la vez. Ten todos los que quieras en el PC y sube solo los que vayas a usar; `subir.sh` avisa si no caben.
+
+> Los avatares no se suben al repo (`.gitignore`). Si usas personajes con derechos de autor, quedan solo en tu PC y tu placa.
 
 ## Hardware
 
@@ -19,110 +107,42 @@ Cada expresión puede ser la cara dibujada por código o un **clip en loop** (sk
 | Placa | LilyGO Lily Pi (ESP32-WROVER, 16 MB flash, 8 MB PSRAM) |
 | Pantalla | ST7796 3.5" 480×320, SPI: MOSI 19, MISO 23, SCLK 18, CS 5, DC 27, BL 12 |
 | Táctil | FT6236 en I2C 0x38 (SDA 21, SCL 22) |
-| USB-serie | CP2104 |
+| Otros | RTC PCF8563 (0x51), relé, microSD. **Sin giroscopio**: la orientación se elige con `girar` |
 
-No hace falta tarjeta SD: los clips van en una partición FAT de ~9.9 MB en la flash interna.
+Conectores:
+- **USB-C del lado del CP2104**: energía **y** datos. Es el que va al PC (el puente habla por ahí).
+- **El otro USB-C y el USB-A**: son pines del ESP32, **no** USB reales (no sirven para pendrives ni datos).
+- **Jack DC 5–12 V**: solo energía.
 
 ## Estructura
 
 ```
 src/            firmware (PlatformIO + Arduino)
-  main.cpp      bucle principal, barra, táctil, comandos por USB
-  cara.*        cara animada dibujada en un sprite (PSRAM)
-  clips.*       reproductor MJPEG (clips sueltos y skins en loop)
-data/           clips .mjpeg que se suben a la flash
-tools/clip.sh   convierte video/GIF a MJPEG 240×240
+  main.cpp      bucle principal, barra, táctil, avatares, comandos por USB
+  clips.*       reproductor MJPEG con círculo y color clave
+  cara.*        cara dibujada por código (si no hay avatares cargados)
+tools/
+  avatar.sh     carpeta de GIFs → avatar (7 estados .mjpeg)
+  subir.sh      elige avatares y los sube a la flash
+  clip.sh       convierte un video suelto a .mjpeg
 bridge/         puente en el PC (Python) + servicio systemd de usuario
-hermes-hook/    hook de gateway de Hermes Agent que avisa los turnos
+hermes-hook/    hook de gateway de Hermes que avisa los turnos
 ```
 
-## Instalación
+## Puente y hook
 
-Requisitos en el PC: [PlatformIO](https://platformio.org/), `ffmpeg`, Python 3 con `pyserial` y `psutil`; `nvidia-smi` opcional para la GPU. En Arch: `pacman -S platformio-core platformio-core-udev ffmpeg python-pyserial python-psutil`.
-Tu usuario necesita acceso al puerto serie (`uucp` en Arch, `dialout` en Debian/Ubuntu).
+`bridge/orion_cara.py` revisa cada 2 s los servicios systemd de usuario del LLM y del gateway, `/slots` de llama.cpp, CPU/RAM/GPU y si el webhook escucha, y recibe del hook los eventos de cada turno. Se reconecta solo si desconectas la placa.
 
 ```bash
-pio run -t upload      # firmware
-pio run -t uploadfs    # clips de data/
+python3 bridge/orion_cara.py estado                      # estado leído, sin pantalla
+python3 bridge/orion_cara.py simular [ok|sin_respuesta]  # turno de WhatsApp falso
+python3 bridge/orion_cara.py enviar <comando>            # cualquier comando del protocolo
+journalctl --user -u orion-cara -f                       # eventos que llegan
 ```
 
-> El puente ocupa el puerto serie: detenlo antes de subir (`systemctl --user stop orion-cara`).
+El hook (`hermes-hook/`) escucha `agent:start`, `agent:step` y `agent:end`, filtra por canal (`ORION_CARA_CANALES`, por defecto `whatsapp_cloud,whatsapp`) y manda **solo metadatos** al puente por `$XDG_RUNTIME_DIR/orion-cara.sock`: evento, canal, paso, herramientas y si hubo respuesta. Nunca el texto de los mensajes. Es no bloqueante: si el puente no corre, no pasa nada.
 
-### Puente (PC)
-
-```bash
-ln -s "$PWD/bridge/orion-cara.service" ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now orion-cara
-```
-
-El servicio asume que el repo está en `~/esp32/orion-cara`; ajusta `ExecStart` si no.
-
-### Hook de Hermes
-
-```bash
-ln -s "$PWD/hermes-hook" ~/.hermes/hooks/orion_cara
-systemctl --user restart hermes-gateway     # los hooks se cargan solo al arrancar
-```
-
-El hook escucha `agent:start`, `agent:step` y `agent:end`, filtra por canal (`ORION_CARA_CANALES`, por defecto `whatsapp_cloud,whatsapp`) y manda **solo metadatos** al puente por un socket unix (`$XDG_RUNTIME_DIR/orion-cara.sock`): evento, canal, número de paso, nombres de herramientas y si hubo respuesta. Nunca el texto de los mensajes. Es no bloqueante: si el puente no corre, no pasa nada.
-
-Para otros canales (p. ej. Telegram), agrega `ORION_CARA_CANALES=whatsapp_cloud,telegram` al entorno del gateway.
-
-## Qué muestra
-
-| Situación | Cara | Frase |
-|---|---|---|
-| Llega un mensaje por WhatsApp | pensando | `WhatsApp: pensando...` / `usando <herramienta>` |
-| Orión respondió | feliz (10 s) + clip `listo` | `WhatsApp: respondido!` |
-| Terminó sin respuesta | error (30 s) | `WhatsApp: no respondio` |
-| 5 min sin `agent:end` | error (30 s) | `WhatsApp: no respondio (se pego)` |
-| Un servicio en estado `failed` | error | `Chuta, se cayo un servicio` |
-| LLM apagado (modo juego) | durmiendo | `Modo juego: LLM apagado` |
-| Nada en curso | choro | `Wena, soy Orion` |
-
-Línea de estado: `LLM ok  Hermes ok  WA ok  CPU 25%  RAM 44%  GPU 60% 6.8/8G 59C` (`WA` = webhook local escuchando en el puerto 8090).
-
-## Clips y skins
-
-```bash
-tools/clip.sh mi_video.mp4 nombre [segundos=8] [fps=12]
-pio run -t uploadfs
-```
-
-Opciones de `clip.sh` por variable de entorno:
-
-- `QUITAR_BLANCO=1`: rellena el fondo blanco que toca los bordes con el color de la pantalla (ideal para emojis/stickers; no borra el blanco interior como los ojos). Requiere ImageMagick.
-- `ENCAJAR=1`: encaja la imagen completa en vez de recortar al centro.
-- `EXTRA_VF="..."`: filtros ffmpeg extra, p. ej. `hue=h=-95` para teñir de rojo una versión "error".
-
-Ejemplo (skin estilo emoji):
-
-```bash
-QUITAR_BLANCO=1 ENCAJAR=1 tools/clip.sh cthulhu_pensando.gif cara_pensando 8
-QUITAR_BLANCO=1 ENCAJAR=1 EXTRA_VF="hue=h=-95:s=1.6" tools/clip.sh cthulhu_pensando.gif cara_error 4
-```
-
-- `data/<nombre>.mjpeg`: clip suelto (comando `clip <nombre>` o modo demo).
-- `data/cara_<expresion>.mjpeg`: **skin** de esa expresión, en loop en lugar de la cara dibujada. Expresiones: `choro`, `feliz`, `pensando`, `durmiendo`, `error`.
-- Clips de eventos que lanza el puente si existen: `despierta` (se prende el LLM), `listo` (respondió), `error`.
-
-Rendimiento medido: ~12 fps a 240×240 en un ESP32 clásico; un segundo de clip ocupa ~80–100 KB.
-
-> Los clips no se suben al repo (`.gitignore`). Si usas personajes con derechos de autor, quedan solo en tu placa.
-
-## Comandos del puente
-
-```bash
-python3 bridge/orion_cara.py estado              # estado leído, sin pantalla
-python3 bridge/orion_cara.py simular [ok|sin_respuesta]   # turno de WhatsApp falso para probar
-python3 bridge/orion_cara.py enviar texto Hola!  # mensaje en pantalla (15 s)
-python3 bridge/orion_cara.py enviar cara feliz
-python3 bridge/orion_cara.py enviar clip listo
-journalctl --user -u orion-cara -f               # ver eventos que llegan del hook
-```
-
-Variables de entorno: `ORION_CARA_PUERTO`, `ORION_LLM_URL` (por defecto `http://127.0.0.1:8081`), `ORION_SERVICIO_LLM`, `ORION_SERVICIO_HERMES`, `ORION_PUERTO_WEBHOOK` (8090).
+Variables del puente: `ORION_CARA_PUERTO`, `ORION_LLM_URL` (`http://127.0.0.1:8081`), `ORION_SERVICIO_LLM`, `ORION_SERVICIO_HERMES`, `ORION_PUERTO_WEBHOOK` (8090).
 
 ## Protocolo serie (115200 baudios)
 
@@ -130,21 +150,32 @@ Una línea por comando:
 
 | Comando | Efecto |
 |---|---|
-| `cara <expresion>` | cambia la expresión |
-| `clip <nombre>` | reproduce un clip suelto |
-| `texto <mensaje>` | frase grande de la barra |
-| `estado <mensaje>` | línea chica de estado |
-| `demo on\|off` | modo demo (expresiones y clips al azar) |
-| `lista` | lista los clips en la flash |
+| `cara <reposo\|choro\|feliz\|pensando\|durmiendo\|error>` | cambia el estado |
+| `clip <nombre>` | reproduce un clip del avatar (`listo`, `despierta`…) o uno suelto |
+| `texto <mensaje>` / `estado <mensaje>` | línea grande / línea chica de la barra |
+| `avatar <nombre>` / `avatares` | elige avatar / lista los cargados |
+| `fondo <color>` / `anillo <color>` / `circulo on\|off` | estilo del círculo |
+| `girar [vertical\|horizontal]` | orientación |
+| `demo on\|off` | modo demo (sin PC vuelve solo a demo tras 30 s) |
 
-Sin comandos durante 30 s, la placa vuelve sola al modo demo. Tocar la pantalla pasa a la siguiente expresión.
+## Detalles técnicos
+
+- Los avatares se guardan como archivos planos `<avatar>@<estado>.mjpeg` en una partición FAT (`app3M_fat9M_16MB.csv`): la herramienta `mkfatfs` no crea carpetas.
+- Cada cuadro es un JPEG **4:2:0** de 320×320; con 4:4:4 el decodificador (JPEGDEC) muestra basura.
+- El fondo del avatar se codifica en **magenta**; al decodificar, la placa lo reemplaza por el color del círculo y pinta el anillo y el exterior. Por eso cambiar el fondo es instantáneo y no requiere reconvertir.
+- ~10 fps a 320×320 en un ESP32 clásico.
+
+## Ideas
+
+- **WiFi** en vez de USB para el estado, para alimentar la placa con cualquier cargador.
+- **microSD** para tener decenas de avatares sin reemplazar.
 
 ## Referencias
 
 - [Hermes Agent: Event Hooks](https://github.com/NousResearch/hermes-agent) (`website/docs/user-guide/features/hooks.md`)
-- [TFT_eSPI](https://github.com/Bodmer/TFT_eSPI) (ejemplos `Animated_Eyes`) y [JPEGDEC](https://github.com/bitbank2/JPEGDEC)
-- [xdwarf/deskpet](https://github.com/xdwarf/deskpet): sistema de expresiones de una mascota de escritorio
-- [arvindelavari/mjpeg-decoder](https://github.com/arvindelavari/mjpeg-decoder) y [ifeech/esp_looping_video_player](https://github.com/ifeech/esp_looping_video_player): reproducción MJPEG en ESP32
+- [TFT_eSPI](https://github.com/Bodmer/TFT_eSPI) y [JPEGDEC](https://github.com/bitbank2/JPEGDEC)
+- [Pokémon Showdown sprites](https://play.pokemonshowdown.com/sprites/) (sprites animados, no incluidos)
+- [xdwarf/deskpet](https://github.com/xdwarf/deskpet), [arvindelavari/mjpeg-decoder](https://github.com/arvindelavari/mjpeg-decoder)
 
 ## Licencia
 

@@ -3,23 +3,52 @@
 #include <FFat.h>
 using fs::File;
 #include <JPEGDEC.h>
-#include <vector>
 
 namespace clips {
 namespace {
 
+const int ANCHO_ANILLO = 6;
+
 TFT_eSPI *pantalla = nullptr;
 JPEGDEC jpeg;
-std::vector<String> lista;
+Estilo estilo = {true, 0x1A9F, 0x5DDF, 0x18E3};
+int centroX = 0, centroY = 0, radio = 0;
+
+// Magenta aproximado: tolera los artefactos de compresión JPEG en los bordes.
+inline bool esClave(uint16_t p) {
+  uint8_t r = p >> 11, g = (p >> 5) & 0x3F, b = p & 0x1F;
+  return r >= 20 && b >= 20 && g <= 28;
+}
 
 int dibujarBloque(JPEGDRAW *b) {
+  uint16_t *px = b->pPixels;
+  const int r2 = radio * radio, ri2 = (radio - ANCHO_ANILLO) * (radio - ANCHO_ANILLO);
+  for (int j = 0; j < b->iHeight; j++) {
+    int dy = b->y + j - centroY;
+    for (int i = 0; i < b->iWidth; i++, px++) {
+      if (estilo.circulo) {
+        int dx = b->x + i - centroX, d2 = dx * dx + dy * dy;
+        if (d2 > r2) {
+          *px = estilo.pantalla;
+          continue;
+        }
+        if (d2 > ri2) {
+          *px = estilo.anillo;
+          continue;
+        }
+        if (esClave(*px)) *px = estilo.fondo;
+      } else if (esClave(*px)) {
+        *px = estilo.pantalla;
+      }
+    }
+  }
   pantalla->pushImage(b->x, b->y, b->iWidth, b->iHeight, b->pPixels);
   return 1;
 }
 
 // Carga un archivo completo en PSRAM.
-uint8_t *cargar(const String &nombre, size_t &tam) {
-  File f = FFat.open("/" + nombre);
+uint8_t *cargar(const String &ruta, size_t &tam) {
+  File f = FFat.open("/" + ruta);
   if (!f) return nullptr;
   tam = f.size();
   uint8_t *datos = (uint8_t *)ps_malloc(tam);
@@ -39,12 +68,22 @@ bool siguienteJpeg(const uint8_t *d, size_t tam, size_t pos, size_t &ini, size_t
   return true;
 }
 
-void decodificar(const uint8_t *d, size_t len, int x, int y) {
+void decodificar(const uint8_t *d, size_t len, const Area &a) {
   if (!jpeg.openRAM((uint8_t *)d, len, dibujarBloque)) return;
   jpeg.setPixelType(RGB565_LITTLE_ENDIAN);
+  int w = jpeg.getWidth(), h = jpeg.getHeight(), escala = 0;
+  if (w > a.w || h > a.h) {
+    escala = JPEG_SCALE_HALF;
+    w /= 2;
+    h /= 2;
+  }
+  int x = a.x + (a.w - w) / 2, y = a.y + (a.h - h) / 2;
+  centroX = x + w / 2;
+  centroY = y + h / 2;
+  radio = min(w, h) / 2 - 1;
   pantalla->setSwapBytes(true);
   pantalla->startWrite();
-  jpeg.decode(x, y, 0);
+  jpeg.decode(x, y, escala);
   pantalla->endWrite();
   pantalla->setSwapBytes(false);
   jpeg.close();
@@ -54,31 +93,28 @@ void decodificar(const uint8_t *d, size_t len, int x, int y) {
 
 bool begin(TFT_eSPI &tft) {
   pantalla = &tft;
-  if (!FFat.begin(false)) return false;
+  return FFat.begin(false);
+}
+
+void setEstilo(const Estilo &e) { estilo = e; }
+
+bool existe(const String &ruta) { return FFat.exists("/" + ruta); }
+
+std::vector<String> avatares() {
+  std::vector<String> lista;
   File raiz = FFat.open("/");
   for (File f = raiz.openNextFile(); f; f = raiz.openNextFile()) {
     String n = f.name();
-    if (n.endsWith(".mjpeg")) lista.push_back(n.startsWith("/") ? n.substring(1) : n);
+    n = n.substring(n.lastIndexOf('/') + 1);
+    if (n.endsWith("@reposo.mjpeg")) lista.push_back(n.substring(0, n.indexOf('@')));
   }
-  return true;
+  std::sort(lista.begin(), lista.end(), [](const String &a, const String &b) { return a < b; });
+  return lista;
 }
 
-int cantidad() { return lista.size(); }
-
-bool existe(const String &nombre) { return FFat.exists("/" + nombre); }
-
-String nombre(int indice) { return lista.at(indice); }
-
-String aleatorio() {
-  std::vector<String> sueltos;
-  for (auto &n : lista)
-    if (!n.startsWith("cara_")) sueltos.push_back(n);
-  return sueltos.empty() ? String() : sueltos[random(sueltos.size())];
-}
-
-float reproducir(const String &nombre, int x, int y, uint16_t fpsObjetivo) {
+float reproducir(const String &ruta, const Area &area, uint16_t fpsObjetivo) {
   size_t tam;
-  uint8_t *datos = cargar(nombre, tam);
+  uint8_t *datos = cargar(ruta, tam);
   if (!datos) return -1;
 
   const uint32_t msPorCuadro = 1000 / fpsObjetivo;
@@ -86,7 +122,7 @@ float reproducir(const String &nombre, int x, int y, uint16_t fpsObjetivo) {
   size_t a, b, pos = 0;
   while (siguienteJpeg(datos, tam, pos, a, b)) {
     uint32_t t0 = millis();
-    decodificar(datos + a, b - a, x, y);
+    decodificar(datos + a, b - a, area);
     cuadros++;
     uint32_t gastado = millis() - t0;
     if (gastado < msPorCuadro) delay(msPorCuadro - gastado);
@@ -98,28 +134,28 @@ float reproducir(const String &nombre, int x, int y, uint16_t fpsObjetivo) {
   return total ? cuadros * 1000.0f / total : 0;
 }
 
-bool Bucle::abrir(const String &nombre) {
+bool Bucle::abrir(const String &ruta) {
   cerrar();
-  datos_ = cargar(nombre, tam_);
+  datos_ = cargar(ruta, tam_);
   pos_ = 0;
-  nombre_ = datos_ ? nombre : String();
+  ruta_ = datos_ ? ruta : String();
   return datos_ != nullptr;
 }
 
 void Bucle::cerrar() {
   free(datos_);
   datos_ = nullptr;
-  nombre_ = "";
+  ruta_ = "";
 }
 
-void Bucle::cuadro(int x, int y) {
+void Bucle::cuadro(const Area &area) {
   if (!datos_) return;
   size_t a, b;
   if (!siguienteJpeg(datos_, tam_, pos_, a, b)) {
     pos_ = 0;
     if (!siguienteJpeg(datos_, tam_, pos_, a, b)) return;
   }
-  decodificar(datos_ + a, b - a, x, y);
+  decodificar(datos_ + a, b - a, area);
   pos_ = b;
 }
 

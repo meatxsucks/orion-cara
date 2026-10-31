@@ -11,6 +11,10 @@ class Cara {
  public:
   explicit Cara(TFT_eSPI &tft);
   bool begin(int x, int y);
+  void mover(int x, int y) {
+    x_ = x;
+    y_ = y;
+  }
   void setExpresion(Expresion e);
   Expresion expresion() const { return expr_; }
   void actualizar(uint32_t ahora);
