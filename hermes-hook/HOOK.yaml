@@ -1,0 +1,6 @@
+name: orion_cara
+description: Avisa a la pantalla orion-cara cuando Orión recibe, procesa y responde un mensaje
+events:
+  - agent:start
+  - agent:step
+  - agent:end

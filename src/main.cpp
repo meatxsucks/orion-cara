@@ -36,15 +36,29 @@ bool hayToque() {
   return n > 0 && n <= 2;
 }
 
+// La barra tiene dos líneas que se redibujan por separado con relleno, sin borrar (evita parpadeo).
+void dibujarTexto() {
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_YELLOW, FONDO);
+  tft.setTextPadding(470);
+  const char *texto = textoLibre.length() ? textoLibre.c_str() : FRASES[cara.expresion()];
+  tft.drawString(texto, 240, 286, 4);
+  tft.setTextPadding(0);
+}
+
+void dibujarEstado() {
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(0xAD55, FONDO);
+  tft.setTextPadding(476);
+  tft.drawString(estado, 240, 310, 2);
+  tft.setTextPadding(0);
+}
+
 void dibujarBarra() {
   tft.fillRect(0, 268, 480, 52, FONDO);
   tft.drawFastHLine(20, 268, 440, 0x4208);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(TFT_YELLOW, FONDO);
-  const char *texto = textoLibre.length() ? textoLibre.c_str() : FRASES[cara.expresion()];
-  tft.drawString(texto, 240, 286, 4);
-  tft.setTextColor(0xAD55, FONDO);
-  tft.drawString(estado, 240, 310, 2);
+  dibujarTexto();
+  dibujarEstado();
 }
 
 // Usa "cara_<expresion>.mjpeg" como skin si existe; si no, la cara dibujada.
@@ -57,14 +71,19 @@ void cargarSkin() {
   } else {
     skin.cerrar();
   }
-  if (habia || skin.activo()) tft.fillRect(0, 0, 480, 266, FONDO);
+  if (!habia && skin.activo()) {
+    tft.fillRect(90, 12, SKIN_X - 90, 250, FONDO);
+    tft.fillRect(SKIN_X + 240, 12, 390 - SKIN_X - 240, 250, FONDO);
+    tft.fillRect(SKIN_X, 12, 240, SKIN_Y - 12, FONDO);
+    tft.fillRect(SKIN_X, SKIN_Y + 240, 240, 262 - SKIN_Y - 240, FONDO);
+  }
 }
 
 void cambiarExpresion(Expresion e) {
   cara.setExpresion(e);
   cargarSkin();
   textoLibre = "";
-  dibujarBarra();
+  dibujarTexto();
 }
 
 void tocarClip(const String &nombre) {
@@ -92,11 +111,11 @@ void procesarComando(String linea) {
     tocarClip(arg.endsWith(".mjpeg") ? arg : arg + ".mjpeg");
   } else if (cmd == "texto") {
     textoLibre = arg;
-    dibujarBarra();
+    dibujarTexto();
   } else if (cmd == "estado") {
     if (arg != estado) {
       estado = arg;
-      dibujarBarra();
+      dibujarEstado();
     }
   } else if (cmd == "demo") {
     modoDemo = arg != "off";
@@ -143,7 +162,7 @@ void loop() {
   if (!modoDemo && ahora - ultimoComando > SIN_PC_MS) {
     modoDemo = true;
     estado = "modo demo";
-    dibujarBarra();
+    dibujarEstado();
   }
 
   if (modoDemo && ahora >= proximoCambio) {

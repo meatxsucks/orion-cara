@@ -146,7 +146,7 @@ void Cara::dibujarBoca(int cx, int cy, uint32_t ahora) {
 void Cara::dibujar(uint32_t ahora) {
   spr_.fillSprite(FONDO);
   int cx = ANCHO / 2;
-  int cy = ALTO / 2 + 8 + (int)(3 * sinf(ahora / 700.0f));
+  int cy = ALTO / 2 + 8;
 
   spr_.fillCircle(cx - 95, cy - 10, 38, PIEL);
   spr_.fillCircle(cx + 95, cy - 10, 38, PIEL);

@@ -1,5 +1,5 @@
 .pio/
 .vscode/
 data/*.mjpeg
-!data/demo.mjpeg
 clips/
+__pycache__/
