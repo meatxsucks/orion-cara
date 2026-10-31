@@ -1,0 +1,11 @@
+[Unit]
+Description=Orion cara: puente de estado hacia la pantalla LilyGO Lily Pi
+After=default.target
+
+[Service]
+ExecStart=/usr/bin/python3 -u %h/esp32/orion-cara/bridge/orion_cara.py correr
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
