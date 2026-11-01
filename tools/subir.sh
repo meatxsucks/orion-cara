@@ -15,7 +15,7 @@ if [[ $# -lt 1 ]]; then
 fi
 [[ "$1" == --todos ]] && set -- $(ls "$origen")
 
-rm -rf "$raiz/data/avatares" "$raiz/data/"*@*.mjpeg
+rm -rf "$raiz/data/avatares" "$raiz/data/"*@*.mjpeg "$raiz/data/"*@frases.txt
 for a in "$@"; do
   [[ -d "$origen/$a" ]] || { echo "No existe $origen/$a" >&2; exit 1; }
   "$raiz/tools/avatar.sh" "$origen/$a" "$a" | tail -2 | head -1

@@ -9,6 +9,7 @@
 #            foto   video o imagen con fondo: llena el círculo completo
 #            (sin modo) imagen con transparencia, escalado suave
 # Los estados que falten se generan desde "reposo" con efectos.
+# Opcional: frases.txt con líneas "estado: frase" para el recuadro (si no, frases neutras).
 # Variables: SEGUNDOS (2, mínimo; se redondea a ciclos completos del GIF), MAX_SEGUNDOS (4),
 #            FPS (10), CALIDAD (10, 2=mejor..31=peor).
 set -euo pipefail
@@ -101,7 +102,7 @@ convertir() {
 
 reposo="$(buscar reposo)"
 [[ -z "$reposo" ]] && { echo "Falta reposo.<ext> en $carpeta" >&2; exit 1; }
-mkdir -p "$salida" && rm -f "$salida/$nombre@"*.mjpeg
+mkdir -p "$salida" && rm -f "$salida/$nombre@"*.mjpeg "$salida/$nombre@frases.txt"
 echo "Avatar '$nombre':"
 for estado in reposo pensando feliz durmiendo error listo despierta; do
   fuente="$(buscar "$estado")"
@@ -111,5 +112,9 @@ for estado in reposo pensando feliz durmiendo error listo despierta; do
     convertir "$reposo" "$estado"
   fi
 done
+if [[ -f "$carpeta/frases.txt" ]]; then
+  cp "$carpeta/frases.txt" "$salida/$nombre@frases.txt"
+  printf "  %-10s %-28s %4s KB\n" frases frases.txt 1
+fi
 echo "Total: $(du -ck "$salida/$nombre@"*.mjpeg | tail -1 | cut -f1) KB. Ocupado en data/: $(du -sk "$raiz/data" | cut -f1) KB de ~10100 KB."
 echo "Sube con: systemctl --user stop orion-cara && pio run -t uploadfs && systemctl --user start orion-cara"

@@ -12,7 +12,27 @@ import urllib.request
 import psutil
 import serial
 
+CONFIG = os.path.expanduser("~/.config/orion-cara/env")
+
+
+def cargar_config():
+    """Carga ~/.config/orion-cara/env (KEY=valor) sin pisar variables ya definidas."""
+    try:
+        with open(CONFIG) as f:
+            for linea in f:
+                clave, _, valor = linea.strip().partition("=")
+                if clave and not clave.startswith("#") and valor:
+                    os.environ.setdefault(clave, valor)
+    except FileNotFoundError:
+        pass
+
+
+cargar_config()
 PUERTO = os.environ.get("ORION_CARA_PUERTO", "")
+HOST = os.environ.get("ORION_CARA_HOST", "orion-cara.local")
+PUERTO_RED = int(os.environ.get("ORION_CARA_PUERTO_RED", "7777"))
+TOKEN = os.environ.get("ORION_CARA_TOKEN", "")
+PING_CADA = 10.0
 LLM_URL = os.environ.get("ORION_LLM_URL", "http://127.0.0.1:8081")
 SERVICIO_LLM = os.environ.get("ORION_SERVICIO_LLM", "llm.service")
 SERVICIO_HERMES = os.environ.get("ORION_SERVICIO_HERMES", "hermes-gateway.service")
@@ -20,9 +40,10 @@ PUERTO_WEBHOOK = int(os.environ.get("ORION_PUERTO_WEBHOOK", "8090"))
 SOCKET = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}", "orion-cara.sock")
 
 INTERVALO = 2.0
-SIN_RESPUESTA_TRAS = 300.0
+SIN_ACTIVIDAD_TRAS = 120.0
+TURNO_MAX = 1200.0
+TEXTO_MANUAL = 15.0
 MOSTRAR_RESULTADO = {"ok": 10.0, "sin_respuesta": 30.0, "timeout": 30.0}
-NOMBRE_CANAL = {"whatsapp_cloud": "WhatsApp", "whatsapp": "WhatsApp"}
 
 # Clips opcionales que se reproducen al ocurrir un evento (si existen en la placa).
 CLIPS_EVENTO = {"despierta": "despierta", "respondio": "listo", "error": "error"}
@@ -106,58 +127,51 @@ class Turnos:
 
     def evento(self, ev):
         sesion = ev.get("sesion") or "?"
-        canal = NOMBRE_CANAL.get(ev.get("canal"), ev.get("canal", "?"))
         tipo = ev.get("evento")
+        ahora = time.time()
         if tipo == "agent:start":
-            self.activos[sesion] = {"inicio": time.time(), "canal": canal, "paso": 0, "herramientas": []}
+            self.activos[sesion] = {"inicio": ahora, "actividad": ahora}
         elif tipo == "agent:step" and sesion in self.activos:
-            self.activos[sesion].update(paso=ev.get("paso", 0), herramientas=ev.get("herramientas", []))
+            self.activos[sesion]["actividad"] = ahora
         elif tipo == "agent:end":
             self.activos.pop(sesion, None)
-            self.resultado = ("ok" if ev.get("respondio") else "sin_respuesta", time.time(), canal)
+            self.resultado = ("ok" if ev.get("respondio") else "sin_respuesta", ahora)
             return self.resultado[0]
         return None
 
-    def revisar_timeouts(self):
+    def revisar_timeouts(self, llm_ocupado):
+        """Da por perdido un turno si el LLM lleva SIN_ACTIVIDAD_TRAS sin trabajar o pasó TURNO_MAX."""
         ahora = time.time()
         for sesion, t in list(self.activos.items()):
-            if ahora - t["inicio"] > SIN_RESPUESTA_TRAS:
+            if llm_ocupado:
+                t["actividad"] = ahora
+            if ahora - t["actividad"] > SIN_ACTIVIDAD_TRAS or ahora - t["inicio"] > TURNO_MAX:
                 del self.activos[sesion]
-                self.resultado = ("timeout", ahora, t["canal"])
+                self.resultado = ("timeout", ahora)
                 return "timeout"
         return None
 
     def cara(self):
-        """(expresión, frase) del turno en curso o del último resultado; None si no hay nada que mostrar."""
+        """Expresión del turno en curso o del último resultado; None si no hay nada que mostrar."""
         if self.activos:
-            t = max(self.activos.values(), key=lambda x: x["inicio"])
-            if t["herramientas"]:
-                return "pensando", f"{t['canal']}: usando {t['herramientas'][0]}"
-            if t["paso"]:
-                return "pensando", f"{t['canal']}: pensando (paso {t['paso']})"
-            return "pensando", f"{t['canal']}: pensando..."
+            return "pensando"
         if self.resultado:
-            tipo, cuando, canal = self.resultado
+            tipo, cuando = self.resultado
             if time.time() - cuando < MOSTRAR_RESULTADO[tipo]:
-                if tipo == "ok":
-                    return "feliz", f"{canal}: respondido!"
-                if tipo == "timeout":
-                    return "error", f"{canal}: no respondio (se pego)"
-                return "error", f"{canal}: no respondio"
+                return "feliz" if tipo == "ok" else "error"
         return None
 
 
 def decidir_cara(e, turnos):
+    """Prioridad: servicio caído > turno en curso o reciente > LLM o Hermes apagado > reposo."""
     if e["hermes"] == "failed" or e["llm"] == "failed":
-        return "error", "Chuta, se cayo un servicio"
+        return "error"
     turno = turnos.cara()
     if turno:
         return turno
-    if e["llm"] != "active":
-        return "durmiendo", "Modo juego: LLM apagado"
-    if e["hermes"] != "active":
-        return "durmiendo", "Hermes apagado"
-    return "choro", "Wena, soy Orion"
+    if e["llm"] != "active" or e["hermes"] != "active":
+        return "durmiendo"
+    return "reposo"
 
 
 def abrir_serie(puerto):
@@ -169,6 +183,81 @@ def abrir_serie(puerto):
     time.sleep(2.5)
     s.reset_input_buffer()
     return s
+
+
+def resolver(host):
+    """IP del host; usa avahi si el sistema no resuelve nombres .local."""
+    try:
+        return socket.gethostbyname(host)
+    except OSError:
+        pass
+    if host.endswith(".local"):
+        try:
+            r = subprocess.run(["avahi-resolve", "-4", "-n", host], capture_output=True, text=True, timeout=5)
+            partes = r.stdout.split()
+            if len(partes) == 2:
+                return partes[1]
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return None
+
+
+class Serie:
+    def __init__(self, puerto):
+        self.nombre = "USB"
+        self.ser = abrir_serie(puerto)
+
+    def enviar(self, cmd):
+        self.ser.write((cmd + "\n").encode())
+
+    def drenar(self):
+        """Devuelve True si la placa avisó que se reinició."""
+        self.resto = getattr(self, "resto", b"") + self.ser.read(self.ser.in_waiting or 1)
+        reinicio = False
+        while b"\n" in self.resto:
+            linea, self.resto = self.resto.split(b"\n", 1)
+            texto = linea.decode(errors="replace").strip()
+            if texto and texto != "ok":
+                print(f"placa: {texto}", flush=True)
+            reinicio = reinicio or texto.startswith("Orion listo")
+        return reinicio
+
+
+class Red:
+    def __init__(self, ip):
+        self.nombre = "WiFi"
+        self.sock = socket.create_connection((ip, PUERTO_RED), timeout=3)
+        self.sock.sendall(f"token {TOKEN}\n".encode())
+        respuesta = self.sock.recv(64).decode(errors="replace").strip()
+        if respuesta != "ok":
+            self.sock.close()
+            raise OSError(f"la placa rechazó la conexión ({respuesta or 'sin respuesta'})")
+        self.sock.setblocking(False)
+
+    def enviar(self, cmd):
+        self.sock.sendall((cmd + "\n").encode())
+
+    def drenar(self):
+        try:
+            if not self.sock.recv(4096):
+                raise OSError("la placa cerró la conexión")
+        except BlockingIOError:
+            pass
+        return False
+
+
+def abrir_conexion():
+    """USB si la placa está enchufada al PC; si no, WiFi cuando hay token configurado."""
+    puerto = buscar_puerto()
+    if puerto:
+        print(f"Conectando por USB a {puerto}", flush=True)
+        return Serie(puerto)
+    if TOKEN:
+        ip = resolver(HOST)
+        if ip:
+            print(f"Conectando por WiFi a {HOST} ({ip})", flush=True)
+            return Red(ip)
+    return None
 
 
 def abrir_socket():
@@ -184,33 +273,30 @@ def correr():
     sock = abrir_socket()
     turnos = Turnos()
     while True:
-        puerto = buscar_puerto()
-        if not puerto:
-            time.sleep(5)
-            continue
         try:
-            print(f"Conectando a {puerto}", flush=True)
-            bucle(abrir_serie(puerto), sock, turnos)
+            conexion = abrir_conexion()
+            if not conexion:
+                time.sleep(5)
+                continue
+            bucle(conexion, sock, turnos)
         except (serial.SerialException, OSError) as err:
             print(f"Conexión perdida: {err}. Reintentando...", flush=True)
             time.sleep(5)
 
 
-def bucle(ser, sock, turnos):
-    enviar = lambda cmd: ser.write((cmd + "\n").encode())
+def bucle(conexion, sock, turnos):
+    enviar = conexion.enviar
     enviar("demo off")
-    mostrado = {"cara": None, "texto": None, "estado": None}
+    mostrado = {"cara": None, "estado": None}
     texto_manual_hasta = 0.0
     llm_antes = None
     e = None
-    proximo = 0.0
+    proximo = ultimo_ping = 0.0
 
     def mostrar(clave, valor):
         if mostrado[clave] != valor:
             enviar(f"{clave} {valor}")
             mostrado[clave] = valor
-            if clave == "cara":
-                mostrado["texto"] = None
 
     while True:
         hubo_evento = False
@@ -223,10 +309,9 @@ def bucle(ser, sock, turnos):
                     if turnos.evento(ev) == "ok":
                         enviar(f"clip {CLIPS_EVENTO['respondio']}")
                     hubo_evento = True
-                else:
+                elif datos:
                     if datos.startswith("texto "):
-                        texto_manual_hasta = time.time() + 15
-                        mostrado["texto"] = datos[6:]
+                        texto_manual_hasta = time.time() + TEXTO_MANUAL
                     enviar(datos)
         except BlockingIOError:
             pass
@@ -234,26 +319,38 @@ def bucle(ser, sock, turnos):
             pass
 
         ahora = time.time()
+        if texto_manual_hasta and ahora >= texto_manual_hasta:
+            texto_manual_hasta = 0.0
+            enviar("texto")
+
         if ahora >= proximo:
             proximo = ahora + INTERVALO
             e = leer_estado()
             if llm_antes not in (None, "active") and e["llm"] == "active":
                 enviar(f"clip {CLIPS_EVENTO['despierta']}")
             llm_antes = e["llm"]
-            if turnos.revisar_timeouts():
+            if turnos.revisar_timeouts(e["llm_ocupado"]):
                 print("turno sin respuesta (timeout)", flush=True)
-            mostrar("estado", linea_estado(e))
+            mostrar("estado", f"{conexion.nombre}  {linea_estado(e)}")
+            if ahora - ultimo_ping > PING_CADA:
+                enviar("demo off")
+                for clave, valor in mostrado.items():
+                    if valor is not None:
+                        enviar(f"{clave} {valor}")
+                ultimo_ping = ahora
             hubo_evento = True
 
         if hubo_evento and e:
-            cara, frase = decidir_cara(e, turnos)
+            cara = decidir_cara(e, turnos)
             if cara != mostrado["cara"] and cara == "error":
                 enviar(f"clip {CLIPS_EVENTO['error']}")
             mostrar("cara", cara)
-            if ahora >= texto_manual_hasta:
-                mostrar("texto", frase)
 
-        ser.read(ser.in_waiting or 1)
+        if conexion.drenar():
+            print("La placa se reinició; reenviando estado", flush=True)
+            enviar("demo off")
+            mostrado.update(cara=None, estado=None)
+            proximo = 0.0
         time.sleep(0.05)
 
 

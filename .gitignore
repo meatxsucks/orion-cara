@@ -1,5 +1,6 @@
 .pio/
 .vscode/
 data/**/*.mjpeg
+data/*@frases.txt
 clips/
 __pycache__/
